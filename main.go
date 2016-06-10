@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"sort"
 )
 
 var includeStandard = flag.Bool("s", false, "Include dependencies from the standard Go libraries.")
@@ -25,12 +24,13 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	paths := make([]string, 0, len(deps))
-	for path := range deps {
-		paths = append(paths, path)
+	repos, err := findRepos(deps)
+	if err != nil {
+		log.Fatal(err)
 	}
-	sort.Strings(paths)
-	for _, path := range paths {
-		fmt.Printf("%s\n", path)
+	outFmt := "%-30s%-50s%-10s%-50s\n"
+	fmt.Printf(outFmt, "ImportPath", "Repo", "VCS", "Root")
+	for i := range deps {
+		fmt.Printf(outFmt, deps[i].ImportPath, repos[i].Repo, repos[i].VCS.Name, repos[i].Root)
 	}
 }

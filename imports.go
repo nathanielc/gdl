@@ -1,9 +1,9 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
 	"os/exec"
+	"sort"
 
 	"github.com/pkg/errors"
 )
@@ -71,81 +71,56 @@ type PackageError struct {
 	hard          bool     // whether the error is soft or hard; soft errors are ignored in some places
 }
 
-func splitJSON(data []byte, atEOF bool) (advance int, token []byte, err error) {
-	if atEOF && len(data) == 0 {
-		return 0, nil, nil
-	}
-	if len(data) == 0 {
-		// Request more data
-		return 0, nil, nil
-	}
-	if data[0] != '{' {
-		return 0, nil, errors.New("first byte must be a '{'")
-	}
-	depth := 0
-	for i, b := range data {
-		switch b {
-		case '{':
-			depth++
-		case '}':
-			depth--
-			if depth == 0 {
-				return i + 2, data[0 : i+1], nil
-			}
-		default:
-			//consume
-		}
-	}
-	// If we're at EOF, we have a final, non-terminated line. Return it.
-	if atEOF {
-		return 0, nil, errors.New("unterminated '{' found")
-	}
-	// Request more data.
-	return 0, nil, nil
-}
-
 // List information on a specific package or a wildcard match.
-func listPackages(importPath string) (map[string]*Package, error) {
-	cmd := exec.Command("go", "list", "-json", importPath)
+func listPackages(importPaths ...string) (map[string]*Package, error) {
+	if len(importPaths) == 0 {
+		return nil, nil
+	}
+	args := append([]string{"list", "-json"}, importPaths...)
+	cmd := exec.Command("go", args...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, errors.Wrapf(err, "initializing stdout for go list cmd with import path %s", importPath)
+		return nil, errors.Wrapf(err, "initializing stdout for go list cmd with import path %v", importPaths[0])
 	}
 	if err := cmd.Start(); err != nil {
-		return nil, errors.Wrapf(err, "starting go list cmd for import path %s", importPath)
+		return nil, errors.Wrapf(err, "starting go list cmd for import path %v", importPaths[0])
 	}
 	packages := make(map[string]*Package)
-	scan := bufio.NewScanner(stdout)
-	scan.Split(splitJSON)
-	for scan.Scan() {
+	dec := json.NewDecoder(stdout)
+	for dec.More() {
 		p := &Package{}
-		if err := json.Unmarshal(scan.Bytes(), p); err != nil {
-			return nil, errors.Wrapf(err, "invalid json go list cmd for import path %s", importPath)
+		if err := dec.Decode(p); err != nil {
+			return nil, errors.Wrapf(err, "invalid json go list cmd for import path %v", importPaths[0])
 		}
 		packages[p.ImportPath] = p
 	}
-	if err := scan.Err(); err != nil {
-		return nil, errors.Wrapf(err, "invalid json go list cmd for import path %s", importPath)
-	}
 	if err := cmd.Wait(); err != nil {
-		return nil, errors.Wrapf(err, "go list cmd failed for import path %s", importPath)
+		return nil, errors.Wrapf(err, "go list cmd failed for import path %v", importPaths[0])
 	}
 	return packages, nil
 }
 
-func findDeps(importPath string, standards, tests bool) (map[string]*Package, error) {
+type Packages []*Package
+
+func (p Packages) Len() int           { return len(p) }
+func (p Packages) Less(i, j int) bool { return p[i].ImportPath < p[j].ImportPath }
+func (p Packages) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
+
+func findDeps(importPath string, standards, tests bool) (Packages, error) {
 	packages, err := listPackages(importPath)
 	if err != nil {
 		return nil, errors.Wrapf(err, "listing packages for path %s", importPath)
 	}
 
-	deps := make(map[string]*Package, len(packages)*3)
+	deps := make(Packages, 0, len(packages)*3)
 
 	packageList := make([]string, 0, len(packages))
 	for path := range packages {
 		packageList = append(packageList, path)
 	}
 	finished := make(map[string]bool)
+
+	missing := []string{}
 
 	for {
 		i := len(packageList)
@@ -159,21 +134,28 @@ func findDeps(importPath string, standards, tests bool) (map[string]*Package, er
 		for _, dep := range pkg.Deps {
 			dp, ok := packages[dep]
 			if !ok {
-				dps, err := listPackages(dep)
-				if err != nil {
-					return nil, errors.Wrapf(err, "listing dependent package %s for path %s", dep, importPath)
+				missing = append(missing, dep)
+
+			} else {
+				if standards || !dp.Standard {
+					deps = append(deps, dp)
 				}
-				dp, ok = dps[dep]
-				if !ok {
-					return nil, errors.Wrapf(err, "could not find dependent package %s for path %s", dep, importPath)
-				}
+			}
+		}
+
+		if len(missing) > 0 {
+			dps, err := listPackages(missing...)
+			if err != nil {
+				return nil, errors.Wrapf(err, "listing dependent package for path %s", importPath)
+			}
+			for dep, dp := range dps {
 				// We only need the information about the package
 				// It doesn't need to be added to packageList since dependencies
 				// have already been fully resolved.
 				packages[dep] = dp
-			}
-			if standards || !dp.Standard {
-				deps[dep] = dp
+				if standards || !dp.Standard {
+					deps = append(deps, dp)
+				}
 			}
 		}
 		if tests {
@@ -189,12 +171,13 @@ func findDeps(importPath string, standards, tests bool) (map[string]*Package, er
 					}
 					packageList = append(packageList, tpath)
 					if standards || !tpkg.Standard {
-						deps[tpath] = tpkg
+						deps = append(deps, tpkg)
 					}
 				}
 			}
 		}
 	}
+	sort.Sort(deps)
 
 	return deps, nil
 }
