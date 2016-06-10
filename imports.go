@@ -3,7 +3,9 @@ package main
 import (
 	"encoding/json"
 	"os/exec"
+	"path"
 	"sort"
+	"strings"
 
 	"github.com/pkg/errors"
 )
@@ -60,6 +62,8 @@ type Package struct {
 	TestImports  []string `json:",omitempty"` // imports from TestGoFiles
 	XTestGoFiles []string `json:",omitempty"` // _test.go files outside package
 	XTestImports []string `json:",omitempty"` // imports from XTestGoFiles
+
+	Vendored bool
 }
 
 // A PackageError describes an error loading information about a package.
@@ -72,30 +76,36 @@ type PackageError struct {
 }
 
 // List information on a specific package or a wildcard match.
-func listPackages(importPaths ...string) (map[string]*Package, error) {
+func listPackages(currentPath string, importPaths ...string) (map[string]*Package, error) {
 	if len(importPaths) == 0 {
 		return nil, nil
 	}
-	args := append([]string{"list", "-json"}, importPaths...)
+	vendoredPath := path.Join(currentPath, "vendor")
+	args := append([]string{"list", "-e", "-json"}, importPaths...)
 	cmd := exec.Command("go", args...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, errors.Wrapf(err, "initializing stdout for go list cmd with import path %v", importPaths[0])
+		return nil, errors.Wrap(err, "initializing stdout for go list cmd")
 	}
 	if err := cmd.Start(); err != nil {
-		return nil, errors.Wrapf(err, "starting go list cmd for import path %v", importPaths[0])
+		return nil, errors.Wrap(err, "starting go list cmd")
 	}
 	packages := make(map[string]*Package)
 	dec := json.NewDecoder(stdout)
 	for dec.More() {
 		p := &Package{}
 		if err := dec.Decode(p); err != nil {
-			return nil, errors.Wrapf(err, "invalid json go list cmd for import path %v", importPaths[0])
+			return nil, errors.Wrap(err, "invalid json go list cmd")
+		}
+		// Rewrite vendored packages
+		if strings.HasPrefix(p.ImportPath, vendoredPath) {
+			p.ImportPath = p.ImportPath[len(vendoredPath)+1:]
+			p.Vendored = true
 		}
 		packages[p.ImportPath] = p
 	}
 	if err := cmd.Wait(); err != nil {
-		return nil, errors.Wrapf(err, "go list cmd failed for import path %v", importPaths[0])
+		return nil, errors.Wrap(err, "go list cmd failed")
 	}
 	return packages, nil
 }
@@ -106,75 +116,87 @@ func (p Packages) Len() int           { return len(p) }
 func (p Packages) Less(i, j int) bool { return p[i].ImportPath < p[j].ImportPath }
 func (p Packages) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
 
-func findDeps(importPath string, standards, tests bool) (Packages, error) {
-	packages, err := listPackages(importPath)
+func findDeps(standards, tests bool, importPaths ...string) (Packages, error) {
+	currentPackages, err := listPackages("", ".")
 	if err != nil {
-		return nil, errors.Wrapf(err, "listing packages for path %s", importPath)
+		return nil, errors.Wrap(err, "listing current package")
+	}
+	if len(currentPackages) != 1 {
+		return nil, errors.New("extra results getting current package")
+	}
+	var currentPackage string
+	for path := range currentPackages {
+		currentPackage = path
+	}
+	packages, err := listPackages(currentPackage, importPaths...)
+	if err != nil {
+		return nil, errors.Wrap(err, "listing packages")
 	}
 
+	// List of all deps
 	deps := make(Packages, 0, len(packages)*3)
-
-	packageList := make([]string, 0, len(packages))
-	for path := range packages {
-		packageList = append(packageList, path)
-	}
-	finished := make(map[string]bool)
-
-	missing := []string{}
-
-	for {
-		i := len(packageList)
-		if i == 0 {
-			break
+	// Keep track of included deps
+	included := make(map[string]bool, len(packages)*3)
+	// Helper to add dep
+	addDep := func(dp *Package) {
+		if !included[dp.ImportPath] && (standards || !dp.Standard) && !strings.HasPrefix(dp.ImportPath, currentPackage) {
+			deps = append(deps, dp)
 		}
-		path := packageList[i-1]
-		finished[path] = true
-		pkg := packages[path]
-		packageList = packageList[:i-1]
+		// Mark as included, even if not actaully added because now we know it won't need to be added.
+		included[dp.ImportPath] = true
+	}
+	if tests {
+		testPackageSet := make(map[string]struct{})
+		for _, pkg := range packages {
+			for _, list := range [][]string{pkg.TestImports, pkg.XTestImports} {
+				for _, path := range list {
+					if _, ok := packages[path]; !ok {
+						testPackageSet[path] = struct{}{}
+					}
+				}
+			}
+		}
+		testImports := make([]string, len(testPackageSet))
+		for path := range testPackageSet {
+			testImports = append(testImports, path)
+		}
+		testPackages, err := listPackages(currentPackage, testImports...)
+		if err != nil {
+			return nil, errors.Wrap(err, "listing test packages")
+		}
+		for path, pkg := range testPackages {
+			packages[path] = pkg
+			addDep(pkg)
+		}
+	}
+	// Set of deps that where not already listed
+	missingSet := make(map[string]struct{})
+
+	// Collect all deps
+	for _, pkg := range packages {
 		for _, dep := range pkg.Deps {
 			dp, ok := packages[dep]
 			if !ok {
-				missing = append(missing, dep)
-
+				missingSet[dep] = struct{}{}
 			} else {
-				if standards || !dp.Standard {
-					deps = append(deps, dp)
-				}
+				addDep(dp)
 			}
 		}
 
-		if len(missing) > 0 {
-			dps, err := listPackages(missing...)
-			if err != nil {
-				return nil, errors.Wrapf(err, "listing dependent package for path %s", importPath)
-			}
-			for dep, dp := range dps {
-				// We only need the information about the package
-				// It doesn't need to be added to packageList since dependencies
-				// have already been fully resolved.
-				packages[dep] = dp
-				if standards || !dp.Standard {
-					deps = append(deps, dp)
-				}
-			}
+	}
+
+	// List any dep packages there weren't already listed
+	if len(missingSet) > 0 {
+		paths := make([]string, len(missingSet))
+		for path := range missingSet {
+			paths = append(paths, path)
 		}
-		if tests {
-			testImports := append(pkg.TestImports, pkg.XTestImports...)
-			for _, testImport := range testImports {
-				tpkgs, err := listPackages(testImport)
-				if err != nil {
-					return nil, errors.Wrapf(err, "listing test packages for path %s", testImport)
-				}
-				for tpath, tpkg := range tpkgs {
-					if finished[tpath] {
-						continue
-					}
-					packageList = append(packageList, tpath)
-					if standards || !tpkg.Standard {
-						deps = append(deps, tpkg)
-					}
-				}
-			}
+		dps, err := listPackages(currentPackage, paths...)
+		if err != nil {
+			return nil, errors.Wrap(err, "listing missing packages")
+		}
+		for _, dp := range dps {
+			addDep(dp)
 		}
 	}
 	sort.Sort(deps)
