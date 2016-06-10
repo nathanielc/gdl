@@ -1,0 +1,11 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/git-commands/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/pkg/errors
+	branch = master
+	commit = a5b220e0c6228dbf18da147b648aa0d3387bc5d4
+	parent = d0758d51c00f1e39d96c71eef4090d7270559b3d
+	cmdver = 0.3.0
