@@ -76,10 +76,6 @@ type PackageError struct {
 	hard          bool     // whether the error is soft or hard; soft errors are ignored in some places
 }
 
-func vendoredPathForPackage(p string) string {
-	return path.Join(p, "vendor")
-}
-
 // List names of packages from import paths.
 func listPackages(importPaths ...string) ([]string, error) {
 	if len(importPaths) == 0 {
@@ -109,11 +105,11 @@ func listPackages(importPaths ...string) ([]string, error) {
 }
 
 // List information on a specific package or a wildcard match.
-func listPackageDetails(currentPath string, importPaths ...string) (map[string]*Package, error) {
+func listPackageDetails(currentPath string, skipVendored bool, importPaths ...string) (map[string]*Package, error) {
 	if len(importPaths) == 0 {
 		return nil, nil
 	}
-	vendoredPath := vendoredPathForPackage(currentPath)
+	vendoredPath := path.Join(currentPath, "vendor") + "/"
 	args := append([]string{"list", "-e", "-json"}, importPaths...)
 	cmd := exec.Command("go", args...)
 	stdout, err := cmd.StdoutPipe()
@@ -132,7 +128,10 @@ func listPackageDetails(currentPath string, importPaths ...string) (map[string]*
 		}
 		// Rewrite vendored packages
 		if strings.HasPrefix(p.ImportPath, vendoredPath) {
-			p.ImportPath = p.ImportPath[len(vendoredPath)+1:]
+			if skipVendored {
+				continue
+			}
+			p.ImportPath = p.ImportPath[len(vendoredPath):]
 			p.Vendored = true
 		}
 		packages[p.ImportPath] = p
@@ -158,16 +157,7 @@ func findDeps(standards, tests, skipVendored bool, importPaths ...string) (Packa
 		return nil, errors.New("extra results getting current package")
 	}
 	currentPackage := currentPackages[0]
-	if skipVendored {
-		vendoredPath := vendoredPathForPackage(currentPackage)
-		for i := 0; i < len(importPaths); i++ {
-			if strings.HasPrefix(importPaths[i], vendoredPath) {
-				importPaths = append(importPaths[0:i], importPaths[i+1:]...)
-				i--
-			}
-		}
-	}
-	packages, err := listPackageDetails(currentPackage, importPaths...)
+	packages, err := listPackageDetails(currentPackage, skipVendored, importPaths...)
 	if err != nil {
 		return nil, errors.Wrap(err, "listing packages")
 	}
@@ -199,7 +189,7 @@ func findDeps(standards, tests, skipVendored bool, importPaths ...string) (Packa
 		for path := range testPackageSet {
 			testImports = append(testImports, path)
 		}
-		testPackages, err := listPackageDetails(currentPackage, testImports...)
+		testPackages, err := listPackageDetails(currentPackage, false, testImports...)
 		if err != nil {
 			return nil, errors.Wrap(err, "listing test packages")
 		}
@@ -229,7 +219,7 @@ func findDeps(standards, tests, skipVendored bool, importPaths ...string) (Packa
 		for path := range missingSet {
 			paths = append(paths, path)
 		}
-		dps, err := listPackageDetails(currentPackage, paths...)
+		dps, err := listPackageDetails(currentPackage, false, paths...)
 		if err != nil {
 			return nil, errors.Wrap(err, "listing missing packages")
 		}
