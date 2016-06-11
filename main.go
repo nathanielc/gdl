@@ -4,14 +4,48 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 )
 
-var includeStandard = flag.Bool("s", false, "Include dependencies from the standard Go libraries.")
-var includeTest = flag.Bool("t", false, "Include dependencies from the tests.")
-var includeRootDepsOnly = flag.Bool("r", false, "Include only dependencies at the root of a repo.")
+func usage() {
+	u := `Usage: gdl [OPTIONS] [PACKAGES..]
+
+	List dependencies of Go packages.
+	This utility is a light wrapper around the 'go list' command,
+	intended to provide easy access to the dependencies of a project.
+
+Examples:
+
+	List all dependencies of the current package.
+	
+		gdl
+	
+	List all dependencies of the current package and all sub packages, (including any vendored packages).
+
+		gdl ./...
+	
+	List all dependencies of the local sub package ./cmd/foo package.
+
+		gdl ./cmd/foo
+	
+	List all dependencies of the current package and all sub packages skipping any locally vendored packages.
+
+		gdl -no-vendored ./...
+
+Options:
+`
+	fmt.Fprintf(os.Stderr, u)
+	flag.PrintDefaults()
+}
+
+var includeStandard = flag.Bool("std", false, "Include dependencies from the standard Go libraries.")
+var includeTest = flag.Bool("test", false, "Include dependencies from tests files.")
+var includeRootDepsOnly = flag.Bool("repo", false, "Include only the first dependency per repo.")
+var skipVendored = flag.Bool("no-vendored", false, "Skip any packages that are vendored below the current package.")
 
 func main() {
+	flag.Usage = usage
 	flag.Parse()
 	args := flag.Args()
 	var paths []string
@@ -20,7 +54,7 @@ func main() {
 	} else {
 		paths = []string{"."}
 	}
-	deps, err := findDeps(*includeStandard, *includeTest, paths...)
+	deps, err := findDeps(*includeStandard, *includeTest, *skipVendored, paths...)
 	if err != nil {
 		log.Fatal(err)
 	}

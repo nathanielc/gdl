@@ -76,6 +76,10 @@ type PackageError struct {
 	hard          bool     // whether the error is soft or hard; soft errors are ignored in some places
 }
 
+func vendoredPathForPackage(p string) string {
+	return path.Join(p, "vendor")
+}
+
 // List names of packages from import paths.
 func listPackages(importPaths ...string) ([]string, error) {
 	if len(importPaths) == 0 {
@@ -109,7 +113,7 @@ func listPackageDetails(currentPath string, importPaths ...string) (map[string]*
 	if len(importPaths) == 0 {
 		return nil, nil
 	}
-	vendoredPath := path.Join(currentPath, "vendor")
+	vendoredPath := vendoredPathForPackage(currentPath)
 	args := append([]string{"list", "-e", "-json"}, importPaths...)
 	cmd := exec.Command("go", args...)
 	stdout, err := cmd.StdoutPipe()
@@ -145,7 +149,7 @@ func (p Packages) Len() int           { return len(p) }
 func (p Packages) Less(i, j int) bool { return p[i].ImportPath < p[j].ImportPath }
 func (p Packages) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
 
-func findDeps(standards, tests bool, importPaths ...string) (Packages, error) {
+func findDeps(standards, tests, skipVendored bool, importPaths ...string) (Packages, error) {
 	currentPackages, err := listPackages(".")
 	if err != nil {
 		return nil, errors.Wrap(err, "listing current package")
@@ -154,6 +158,15 @@ func findDeps(standards, tests bool, importPaths ...string) (Packages, error) {
 		return nil, errors.New("extra results getting current package")
 	}
 	currentPackage := currentPackages[0]
+	if skipVendored {
+		vendoredPath := vendoredPathForPackage(currentPackage)
+		for i := 0; i < len(importPaths); i++ {
+			if strings.HasPrefix(importPaths[i], vendoredPath) {
+				importPaths = append(importPaths[0:i], importPaths[i+1:]...)
+				i--
+			}
+		}
+	}
 	packages, err := listPackageDetails(currentPackage, importPaths...)
 	if err != nil {
 		return nil, errors.Wrap(err, "listing packages")
@@ -168,7 +181,7 @@ func findDeps(standards, tests bool, importPaths ...string) (Packages, error) {
 		if !included[dp.ImportPath] && (standards || !dp.Standard) && !strings.HasPrefix(dp.ImportPath, currentPackage) {
 			deps = append(deps, dp)
 		}
-		// Mark as included, even if not actaully added because now we know it won't need to be added.
+		// Mark as included, even if not actually added because now we know it won't need to be added.
 		included[dp.ImportPath] = true
 	}
 	if tests {
@@ -208,7 +221,6 @@ func findDeps(standards, tests bool, importPaths ...string) (Packages, error) {
 				addDep(dp)
 			}
 		}
-
 	}
 
 	// List any dep packages there weren't already listed
