@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"os/exec"
 	"path"
@@ -75,8 +76,36 @@ type PackageError struct {
 	hard          bool     // whether the error is soft or hard; soft errors are ignored in some places
 }
 
+// List names of packages from import paths.
+func listPackages(importPaths ...string) ([]string, error) {
+	if len(importPaths) == 0 {
+		return nil, nil
+	}
+	args := append([]string{"list", "-e"}, importPaths...)
+	cmd := exec.Command("go", args...)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, errors.Wrap(err, "initializing stdout for go list cmd")
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, errors.Wrap(err, "starting go list cmd")
+	}
+	packages := make([]string, 0, len(importPaths))
+	scanner := bufio.NewScanner(stdout)
+	for scanner.Scan() {
+		packages = append(packages, scanner.Text())
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, errors.Wrap(err, "uncountered err reading command output")
+	}
+	if err := cmd.Wait(); err != nil {
+		return nil, errors.Wrap(err, "go list cmd failed")
+	}
+	return packages, nil
+}
+
 // List information on a specific package or a wildcard match.
-func listPackages(currentPath string, importPaths ...string) (map[string]*Package, error) {
+func listPackageDetails(currentPath string, importPaths ...string) (map[string]*Package, error) {
 	if len(importPaths) == 0 {
 		return nil, nil
 	}
@@ -117,18 +146,15 @@ func (p Packages) Less(i, j int) bool { return p[i].ImportPath < p[j].ImportPath
 func (p Packages) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
 
 func findDeps(standards, tests bool, importPaths ...string) (Packages, error) {
-	currentPackages, err := listPackages("", ".")
+	currentPackages, err := listPackages(".")
 	if err != nil {
 		return nil, errors.Wrap(err, "listing current package")
 	}
 	if len(currentPackages) != 1 {
 		return nil, errors.New("extra results getting current package")
 	}
-	var currentPackage string
-	for path := range currentPackages {
-		currentPackage = path
-	}
-	packages, err := listPackages(currentPackage, importPaths...)
+	currentPackage := currentPackages[0]
+	packages, err := listPackageDetails(currentPackage, importPaths...)
 	if err != nil {
 		return nil, errors.Wrap(err, "listing packages")
 	}
@@ -160,7 +186,7 @@ func findDeps(standards, tests bool, importPaths ...string) (Packages, error) {
 		for path := range testPackageSet {
 			testImports = append(testImports, path)
 		}
-		testPackages, err := listPackages(currentPackage, testImports...)
+		testPackages, err := listPackageDetails(currentPackage, testImports...)
 		if err != nil {
 			return nil, errors.Wrap(err, "listing test packages")
 		}
@@ -191,7 +217,7 @@ func findDeps(standards, tests bool, importPaths ...string) (Packages, error) {
 		for path := range missingSet {
 			paths = append(paths, path)
 		}
-		dps, err := listPackages(currentPackage, paths...)
+		dps, err := listPackageDetails(currentPackage, paths...)
 		if err != nil {
 			return nil, errors.Wrap(err, "listing missing packages")
 		}
